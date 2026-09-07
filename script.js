@@ -8,11 +8,14 @@ const guestList = {
   "maria santos": { displayName: "Maria Santos", seats: 2 }
 };
 
-const supabaseClient = window.supabase.createClient(
-  "https://twqknyqbskgcjyqrnvzh.supabase.co",
-  "sb_publishable_VKfvmXng_zOJfkeqRk1K6A_Qzalsrj_"
-);
+const supabaseClient = window.supabase
+  ? window.supabase.createClient(
+      "https://twqknyqbskgcjyqrnvzh.supabase.co",
+      "sb_publishable_VKfvmXng_zOJfkeqRk1K6A_Qzalsrj_"
+    )
+  : null;
 
+const RSVP_STORAGE_KEY = "wedding-rsvp-records";
 
 // ------------------------------------------------------------
 // HELPER FUNCTIONS
@@ -277,6 +280,22 @@ function normalizeName(name) {
 // ------------------------------------------------------------
 // FIND INVITATION
 // ------------------------------------------------------------
+function getLocalGuest(key) {
+  const match = Object.entries(guestList).find(([guestName]) => normalizeName(guestName) === key);
+
+  if (!match) {
+    return null;
+  }
+
+  const [name, details] = match;
+
+  return {
+    id: `local-${normalizeName(name)}`,
+    name: details.displayName,
+    seats: details.seats
+  };
+}
+
 async function lookupGuest() {
 
   const key =
@@ -304,18 +323,34 @@ async function lookupGuest() {
   findInvitation.disabled = true;
   findInvitation.textContent = "Checking...";
 
-  const { data: guest, error } = await supabaseClient
-    .from("Guest")
-    .select("id, name, seats")
-    .ilike("name", key)
-    .maybeSingle();
+  let guest = null;
+  let lookupError = null;
+
+  if (supabaseClient) {
+    try {
+      const { data, error } = await supabaseClient
+        .from("Guest")
+        .select("id, name, seats")
+        .ilike("name", key)
+        .maybeSingle();
+
+      guest = data;
+      lookupError = error;
+    } catch (error) {
+      lookupError = error;
+    }
+  }
+
+  if (!guest && !lookupError) {
+    guest = getLocalGuest(key);
+  }
 
   findInvitation.disabled = false;
   findInvitation.textContent = buttonLabel;
 
-  if (error) {
+  if (lookupError) {
     lookupMessage.textContent = "We couldn't connect to the guest list. Please try again.";
-    console.error(error);
+    console.error(lookupError);
     return;
   }
 
@@ -560,31 +595,66 @@ form.addEventListener(
     submitButton.disabled = true;
     submitButton.textContent = "Sending...";
 
-    const { error } = await supabaseClient
-      .from("rsvps")
-      .insert({
-        guest_id: activeGuest.id,
-        attendance: response.attendance,
-        meal: response.meal,
-        requests: response.requests
-      });
+    let submissionError = null;
+    const shouldUseLocalFallback =
+      !supabaseClient ||
+      typeof activeGuest.id === "string" && activeGuest.id.startsWith("local-") ||
+      typeof activeGuest.id !== "number" && typeof activeGuest.id !== "string";
+
+    if (shouldUseLocalFallback) {
+      try {
+        const savedResponses = JSON.parse(localStorage.getItem(RSVP_STORAGE_KEY) || "[]");
+        savedResponses.push({
+          ...response,
+          guest_id: activeGuest.id,
+          storedLocally: true
+        });
+        localStorage.setItem(RSVP_STORAGE_KEY, JSON.stringify(savedResponses));
+      } catch (error) {
+        submissionError = error;
+      }
+    } else {
+      try {
+        const { error } = await supabaseClient
+          .from("rsvps")
+          .insert({
+            guest_id: activeGuest.id,
+            attendance: response.attendance,
+            meal: response.meal,
+            requests: response.requests
+          });
+
+        submissionError = error;
+      } catch (error) {
+        submissionError = error;
+      }
+    }
 
     submitButton.disabled = false;
     submitButton.textContent = "Submit RSVP";
 
-    if (error) {
+    if (submissionError) {
       formMessage.textContent = "We couldn't save your RSVP. Please try again.";
-      console.error(error);
+      console.error(submissionError);
       return;
     }
 
-
-    // Hide form
     form.style.display = "none";
-
-
-    // Show success screen
     success.classList.add("show");
+
+    const rsvpCard = success.closest(".rsvp-card");
+    rsvpCard?.scrollIntoView({ behavior: "auto", block: "center" });
+
+    if (rsvpCard) {
+      const cardRect = rsvpCard.getBoundingClientRect();
+      const cardOffset =
+        (cardRect.top + cardRect.bottom) / 2 - window.innerHeight / 2;
+
+      const previousScrollBehavior = document.documentElement.style.scrollBehavior;
+      document.documentElement.style.scrollBehavior = "auto";
+      window.scrollBy(0, cardOffset);
+      document.documentElement.style.scrollBehavior = previousScrollBehavior;
+    }
 
   }
 );
